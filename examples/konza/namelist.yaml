@@ -1,0 +1,22 @@
+# HUC id to define the domain
+# example is not run at HUC level. ./input/domain.gpkg was pre-constructed
+domain_huc: '00000000'
+#
+# Overwrite/recreate intermediate data outputs
+overwrite: False
+#
+# Print additional model messages 
+verbose: True
+#
+# start date for analysis - must be within parflow simulation period
+start_date: '2002-10-01'
+#
+# end date for analysis - must be within parflow simulation period
+end_date: '2006-09-30'
+#
+# threshold for stream network identification via flow accumulation calculation - must be integer -- notes: 500,1000,5000,10000,50000,100000
+facc_strm_threshold_ncells: 1000
+#
+# hf_hydrodata credentials https://hf-hydrodata.readthedocs.io/en/latest/getting_started.html#creating-a-hydrogen-api-account
+hf_hydrodata_un: ''
+hf_hydrodata_pin: ''
