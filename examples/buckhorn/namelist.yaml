@@ -19,8 +19,3 @@ facc_strm_threshold: 1000
 # hf_hydrodata credentials https://hf-hydrodata.readthedocs.io/en/latest/getting_started.html#creating-a-hydrogen-api-account
 #hf_hydrodata_un: ...
 #hf_hydrodata_pin: ...
-
-conus1_download_dir: C:\Users\GEVENSON\Data\parflow_conus1_domain\wtd\raw
-#
-soil_texture: C:\Users\GEVENSON\Data\parflow_conus1_domain\ssurgo\parflow_conus1_domain_soils.gpkg
-

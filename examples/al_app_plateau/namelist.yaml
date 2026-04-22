@@ -1,4 +1,5 @@
 # HUC id to define the domain
+# example is not run at HUC level. ./input/domain.gpkg was pre-constructed
 domain_huc: '00000000'
 #
 # Overwrite/recreate intermediate data outputs
@@ -17,9 +18,5 @@ end_date: '2006-09-30'
 facc_strm_threshold: 1000
 #
 # hf_hydrodata credentials https://hf-hydrodata.readthedocs.io/en/latest/getting_started.html#creating-a-hydrogen-api-account
-#hf_hydrodata_un: 'evenson.grey@epa.gov'
-#hf_hydrodata_pin: '2234'
-#
-conus1_download_dir: C:\Users\GEVENSON\Data\parflow_conus1_domain\wtd\raw
-#
-soil_texture: C:\Users\GEVENSON\Data\parflow_conus1_domain\ssurgo\parflow_conus1_domain_soils.gpkg
+#hf_hydrodata_un: ''
+#hf_hydrodata_pin: ''
