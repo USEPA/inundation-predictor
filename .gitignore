@@ -162,7 +162,7 @@ cython_debug/
 #.idea/
 
 examples/buckhorn/input
-examples/buckhorn/output
+examples/buckhorn/output/raw
 examples/buckhorn/execution/cache
 examples/buckhorn/visualization/cache
 examples/conus1/input
@@ -171,7 +171,7 @@ examples/conus1/execution/cache
 examples/conus1/visualization
 examples/conus1/subdomains
 examples/al_app_plateau/input
-examples/al_app_plateau/output
+examples/al_app_plateau/output/raw
 examples/al_app_plateau/execution/cache
 examples/al_app_plateau/validation/peterson_jones_2025/cuahsi_downloads
 examples/konza/execution/cache
@@ -179,4 +179,4 @@ examples/konza/input/wtd
 examples/konza/input/*.tiff
 examples/konza/input/soil_texture.gpkg
 examples/konza/input/domain_buf.gpkg
-examples/konza/output
+examples/konza/output/raw
