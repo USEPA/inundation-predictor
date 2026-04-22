@@ -1,1 +1,8 @@
-This repo is associated with a US Environmental Protection Agency (EPA) Office of Research and Development (ORD) research effort to simulate non perennial stream dynamics at large spatial scales. Please contact Grey Evenson (evenson.grey@epa.gov) with questions.
+For questions:
+
+Grey Evenson
+evenson.grey@epa.gov
+Hydrological and Aquatic Simulation and Analysis Branch
+Applied Science and Environmental Methods Division
+Office of Applied Science and Environmental Solutions
+US Environmental Protection Agency, Cincinnati, OH
