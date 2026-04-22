@@ -4,10 +4,15 @@ import py3dep
 import geopandas
 import rioxarray
 import whitebox
-import multiprocessing
+import glob
 import subprocess
 from osgeo import gdal
 from geocube.api.core import make_geocube
+import math
+import numpy as np
+from affine import Affine
+from rasterio.warp import transform_bounds
+
 #from whitebox_workflows import WbEnvironment
 
 async def download_dem(**kwargs):
@@ -231,24 +236,133 @@ def calc_twi(**kwargs):
         if verbose: print(f' found existing TWI file {fname_twi}')
 
 def calc_twi_mean(**kwargs):
+    """
+    Compute the mean TWI per WTD grid cell over the full TWI extent,
+    then reproject the result back to the original TWI grid so all TWI cells
+    are present in the output (no cut-off).
+
+    Required kwargs:
+      - fname_twi: path to input TWI raster
+      - fname_twi_mean: path to output raster
+      - wtd_raw_dir: directory containing one or more WTD rasters (.tif/.tiff)
+
+    Optional kwargs:
+      - verbose: bool
+      - overwrite: bool
+      - compress: str (e.g., 'deflate' or 'lzw')
+    """
+    import os
+    import glob
+    import math
+    import numpy as np
+    import rioxarray
+    import rasterio
+    from affine import Affine
+    from rasterio.warp import transform_bounds
+
     fname_twi          = kwargs.get('fname_twi',      None)
     fname_twi_mean     = kwargs.get('fname_twi_mean', None)
     wtd_raw_dir        = kwargs.get('wtd_raw_dir',    None)
     verbose            = kwargs.get('verbose',        False)
     overwrite          = kwargs.get('overwrite',      False)
-    if verbose: print('calling calc_twi_mean')
-    if not os.path.isfile(fname_twi_mean) or overwrite:
-        fname_example_wtd_raw = [fn for fn in os.listdir(wtd_raw_dir) if str(fn).endswith('.tiff')][0]
-        fname_example_wtd_raw = os.path.join(wtd_raw_dir,fname_example_wtd_raw)
-        if not os.path.isfile(fname_example_wtd_raw):
-            raise ValueError(f'calc_twi_mean could not locate example raw wtd file - {fname_example_wtd_raw} is not valid file')
-        if verbose: print(f' calculating mean twi and saving to {fname_twi_mean} (calculating mean twi in each wtd grid cell)')
-        with rioxarray.open_rasterio(fname_twi,masked=True) as riox_ds_twi, rioxarray.open_rasterio(fname_example_wtd_raw,masked=True) as riox_ds_wtd:
-            twi_mean = riox_ds_twi.rio.reproject_match(riox_ds_wtd, resampling=rasterio.enums.Resampling.average)
-            twi_mean = twi_mean.rio.reproject_match(riox_ds_twi, resample=rasterio.enums.Resampling.nearest)
-            twi_mean.rio.to_raster(fname_twi_mean,compress=True)
-    else:
-        if verbose: print(f' found existing mean TWI file {fname_twi_mean}')
+    compress           = kwargs.get('compress',       'deflate')  # 'deflate' or 'lzw'
+
+    if verbose:
+        print('calling calc_twi_mean')
+
+    if not fname_twi or not fname_twi_mean or not wtd_raw_dir:
+        raise ValueError('fname_twi, fname_twi_mean, and wtd_raw_dir are required')
+
+    if os.path.isfile(fname_twi_mean) and not overwrite:
+        if verbose:
+            print(f' found existing mean TWI file {fname_twi_mean}')
+        return
+
+    # Pick a representative WTD raster to define CRS/resolution/grid alignment
+    wtd_candidates = sorted(
+        glob.glob(os.path.join(wtd_raw_dir, '*.tif')) +
+        glob.glob(os.path.join(wtd_raw_dir, '*.tiff'))
+    )
+    if not wtd_candidates:
+        raise ValueError(f'calc_twi_mean could not locate any .tif/.tiff files in {wtd_raw_dir}')
+    fname_example_wtd_raw = wtd_candidates[0]
+
+    if verbose:
+        print(f' calculating mean TWI per WTD cell and saving on TWI grid -> {fname_twi_mean}')
+
+    with rioxarray.open_rasterio(fname_twi, masked=True) as riox_ds_twi, \
+         rioxarray.open_rasterio(fname_example_wtd_raw, masked=True) as riox_ds_wtd:
+
+        # Validate CRS presence
+        if riox_ds_twi.rio.crs is None:
+            raise ValueError('Input TWI raster has no CRS defined.')
+        if riox_ds_wtd.rio.crs is None:
+            raise ValueError('Example WTD raster has no CRS defined.')
+
+        # Build a WTD-grid template that fully covers the TWI extent (prevents cut-off)
+        wtd_crs = riox_ds_wtd.rio.crs
+        wtd_transform = riox_ds_wtd.rio.transform()
+
+        left_twi, bottom_twi, right_twi, top_twi = riox_ds_twi.rio.bounds()
+        twi_crs = riox_ds_twi.rio.crs
+
+        left_wtd, bottom_wtd, right_wtd, top_wtd = transform_bounds(
+            twi_crs, wtd_crs, left_twi, bottom_twi, right_twi, top_twi, densify_pts=21
+        )
+
+        # Convert those bounds to WTD pixel indices and snap to grid
+        inv = ~wtd_transform
+        c0, r0 = inv * (left_wtd,  top_wtd)
+        c1, r1 = inv * (right_wtd, bottom_wtd)
+
+        col_min = math.floor(min(c0, c1))
+        row_min = math.floor(min(r0, r1))
+        col_max = math.ceil(max(c0, c1))
+        row_max = math.ceil(max(r0, r1))
+
+        width = int(col_max - col_min)
+        height = int(row_max - row_min)
+
+        if width <= 0 or height <= 0:
+            raise ValueError('Computed WTD template has non-positive dimensions. Check input extents/CRS.')
+
+        template_transform = wtd_transform * Affine.translation(col_min, row_min)
+
+        # Aggregate TWI -> WTD grid using average resampling on the full-coverage template.
+        # IMPORTANT: Do not pass src_nodata/dst_nodata; rioxarray manages those internally.
+        twi_on_wtd = riox_ds_twi.rio.reproject(
+            dst_crs=wtd_crs,
+            transform=template_transform,
+            shape=(height, width),
+            resampling=rasterio.enums.Resampling.average
+        )
+
+        # Always project back to the TWI grid so the output has exactly the TWI footprint
+        twi_mean = twi_on_wtd.rio.reproject_match(
+            riox_ds_twi,
+            resampling=rasterio.enums.Resampling.nearest
+        )
+
+        # Ensure floating dtype for averaged values
+        if np.issubdtype(twi_mean.dtype, np.integer):
+            twi_mean = twi_mean.astype('float32')
+        else:
+            # Keep float32 to reduce file size if float64
+            try:
+                twi_mean = twi_mean.astype('float32')
+            except Exception:
+                pass
+
+        # Write output
+        os.makedirs(os.path.dirname(fname_twi_mean) or '.', exist_ok=True)
+        twi_mean.rio.to_raster(
+            fname_twi_mean,
+            compress=compress,
+            tiled=True
+        )
+
+        if verbose:
+            print(f' wrote {fname_twi_mean}')
 
 def set_domain_mask(**kwargs):
     domain            = kwargs.get('domain',            None)

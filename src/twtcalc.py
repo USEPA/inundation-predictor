@@ -8,6 +8,8 @@ from rasterio.enums import Resampling
 import numpy as np
 import rasterio
 from rasterio import warp
+from osgeo import gdal
+gdal.UseExceptions()
 
 def calculate_strm_permanence(
     *,
@@ -61,11 +63,18 @@ def calculate_strm_permanence(
         mask_da = mask_da.squeeze("band", drop=True)
 
     # Align mask to percent grid using nearest-neighbor (categorical-safe)
-    mask_da = mask_da.rio.reproject_match(perc_da)
+    mask_da = mask_da.rio.reproject_match(perc_da, resampling="nearest")
 
     # Load fully into memory
     perc_da = perc_da.load()
     mask_da = mask_da.load()
+
+    # Save georeferencing now (xarray ops can drop attrs)
+    crs = perc_da.rio.crs
+    try:
+        transform = perc_da.rio.transform()
+    except Exception:
+        transform = None
 
     # Normalize nodata to NaN using nodata values from rioxarray
     nd_perc = perc_da.rio.nodata
@@ -76,8 +85,11 @@ def calculate_strm_permanence(
     if nd_mask is not None and not (isinstance(nd_mask, float) and np.isnan(nd_mask)):
         mask_da = mask_da.where(mask_da != nd_mask, other=np.nan)
 
+    # Cap any percent values > 100 to exactly 100 (preserve NaNs)
+    perc_da = xr.where(perc_da > 100.0, 100.0, perc_da)
+
     # Build boolean stream mask: True where mask == 1 (NaNs -> False)
-    stream_mask_bool = (mask_da == 1)
+    stream_mask_bool = (mask_da == 1).fillna(False)
 
     # Restrict perc to streams; outside -> NaN
     perc_on_streams = perc_da.where(stream_mask_bool, other=np.nan)
@@ -86,93 +98,38 @@ def calculate_strm_permanence(
     is_perennial = np.isfinite(perc_on_streams) & (np.abs(perc_on_streams - 100.0) <= atol)
     perennial_da = xr.where(is_perennial, 1.0, np.nan).astype("float32")
 
-    # Non-perennial where on streams, finite, >0 and not perennial
-    nonperennial_mask = stream_mask_bool & np.isfinite(perc_da) & (perc_da > 0.0) & (~is_perennial)
-    nonperennial_da = xr.where(nonperennial_mask, perc_da, np.nan).astype("float32")
+    # Non-perennial where on streams, finite, >0 and not perennial (use stream-masked perc)
+    nonperennial_mask = (
+        stream_mask_bool
+        & np.isfinite(perc_on_streams)
+        & (perc_on_streams > 0.0)
+        & (~is_perennial)
+    )
+    nonperennial_da = xr.where(nonperennial_mask, perc_on_streams, np.nan).astype("float32")
 
-    # Preserve georeferencing from percent grid and clear nodata tag (use NaNs)
-    perennial_da = perennial_da.rio.write_crs(perc_da.rio.crs, inplace=False)
-    perennial_da = perennial_da.rio.write_transform(perc_da.rio.transform(), inplace=False)
-    perennial_da = perennial_da.rio.write_nodata(None, inplace=False)
+    # Write georeferencing back only if we have it, and set nodata to NaN
+    if crs is not None:
+        perennial_da = perennial_da.rio.write_crs(crs, inplace=False)
+        nonperennial_da = nonperennial_da.rio.write_crs(crs, inplace=False)
+    else:
+        if verbose:
+            print("Warning: input percent grid has no CRS; writing outputs without CRS")
 
-    nonperennial_da = nonperennial_da.rio.write_crs(perc_da.rio.crs, inplace=False)
-    nonperennial_da = nonperennial_da.rio.write_transform(perc_da.rio.transform(), inplace=False)
-    nonperennial_da = nonperennial_da.rio.write_nodata(None, inplace=False)
+    if transform is not None:
+        perennial_da = perennial_da.rio.write_transform(transform, inplace=False)
+        nonperennial_da = nonperennial_da.rio.write_transform(transform, inplace=False)
 
-    # Write outputs using rioxarray defaults (no extra to_raster options)
-    perennial_da.rio.to_raster(fname_p)
-    nonperennial_da.rio.to_raster(fname_np)
+    perennial_da = perennial_da.rio.write_nodata(np.nan, inplace=False)
+    nonperennial_da = nonperennial_da.rio.write_nodata(np.nan, inplace=False)
+
+    # Write outputs
+    perennial_da.rio.to_raster(fname_p, compress="zstd", zlevel=9)
+    nonperennial_da.rio.to_raster(fname_np, compress="zstd", zlevel=9)
 
     if verbose:
         print("done.")
 
     return fname_p, fname_np
-
-def calculate_inundation_slow(
-    *,
-    dt_start: datetime.datetime,
-    dt_end: datetime.datetime,
-    wtd_raw_dir: str,
-    wtd_resampled_dir: str,
-    inundation_out_dir: str,
-    fname_twi: str,
-    fname_twi_mean: str,
-    fname_soil_trans: str,
-    verbose: bool = False,
-    overwrite: bool = False,
-):
-    #
-    #
-    if verbose: print('calling calculate_inundation_slow')
-    need = _check_exist(inundation_out_dir,dt_start,dt_end)
-    if not need:
-        if verbose: print( f' found existing inundation calculations in {inundation_out_dir}')
-        return
-    #
-    #
-    os.makedirs(inundation_out_dir, exist_ok=True)
-    twi         = rioxarray.open_rasterio(filename=fname_twi,masked=True)
-    twi_mean    = rioxarray.open_rasterio(filename=fname_twi_mean,masked=True)
-    twi_mean    = twi_mean.rio.reproject_match(twi, resampling=Resampling.bilinear)
-    soil_transm = rioxarray.open_rasterio(filename=fname_soil_trans,masked=True)
-    soil_transm = soil_transm.rio.reproject_match(twi, resampling=Resampling.bilinear)
-    #
-    #
-    if "band" in twi.dims and twi.sizes["band"] == 1:
-        twi = twi.squeeze("band", drop=True)
-    if "band" in twi_mean.dims and twi_mean.sizes["band"] == 1:
-        twi_mean = twi_mean.squeeze("band", drop=True)
-    if "band" in soil_transm.dims and soil_transm.sizes["band"] == 1:
-        soil_transm = soil_transm.squeeze("band", drop=True)
-    #
-    # 
-    threshold = xr.where(soil_transm != 0, - (twi - twi_mean) / soil_transm, np.nan)
-    threshold = threshold.astype("float32")
-    #
-    #
-    idt = dt_start
-    while idt <= dt_end:
-        dt_str             = idt.strftime('%Y%m%d')
-        fname_wtd_mean_raw = os.path.join(wtd_raw_dir,f'wtd_{dt_str}.tiff')
-        fname_inund        = os.path.join(inundation_out_dir,f'inundation_{dt_str}.tiff')
-        if not os.path.isfile(fname_wtd_mean_raw):
-            raise Exception(f'calculate_inundation could not find {fname_wtd_mean_raw}')
-        if not os.path.isfile(fname_inund) or overwrite:
-            if verbose: print(f' processing {dt_str}')
-            with rioxarray.open_rasterio(fname_wtd_mean_raw, masked=True) as rioxds_wtd_raw:
-                wtd_mean = rioxds_wtd_raw.rio.reproject_match(twi, resampling=Resampling.bilinear)
-            if "band" in wtd_mean.dims and wtd_mean.sizes["band"] == 1:
-                wtd_mean = wtd_mean.squeeze("band", drop=True)
-            wtd_mean = -wtd_mean
-            wtd_mean = xr.where(wtd_mean >= threshold, 1.0, np.nan)
-            wtd_mean = wtd_mean.astype("float32").rio.write_nodata(np.nan)
-            wtd_mean.rio.to_raster(
-                fname_inund,
-                compress="deflate",
-                tiled=True,
-                BIGTIFF="IF_SAFER",
-            )
-        idt += datetime.timedelta(days=1)
 
 def _read_base_grid_and_array(fname):
     """
@@ -216,36 +173,51 @@ def _reproject_to_target(src_path, dst_shape, dst_transform, dst_crs,
         )
     return dst
 
-def _write_geotiff(fname, 
-                   arr, 
-                   profile, 
-                   compress="deflate", 
-                   bigtiff="IF_SAFER",
-                   blocksize=512, 
-                   zlevel=1, 
-                   predictor=2):
+def write_binary_inundation_tiff(
+    fname,
+    arr,
+    profile,
+    compress="zstd",
+    bigtiff="IF_SAFER",
+    blocksize=512,
+    zlevel=9,          # higher level than 1: better compression, similar read speed
+):
     """
-    Write a single-band float32 GeoTIFF with tiling and compression.
+    Write a binary inundation mask (1=water, 0=NoData) as a compact, fast GeoTIFF:
+      - NBITS=1, tiled, ZSTD compression, sparse tiles
+      - optional internal overviews with nearest resampling
     """
+    # Ensure binary uint8 array with values {0, 1}
+    if arr.dtype != np.uint8:
+        arr = (arr > 0).astype(np.uint8)
+    unique_vals = np.unique(arr)
+    if not np.all(np.isin(unique_vals, [0, 1])):
+        raise ValueError(f"Array contains values other than 0/1: {unique_vals}")
+
     out_profile = profile.copy()
+    # Force dtype and nodata for binary mask
     out_profile.update(
         driver="GTiff",
+        dtype="uint8",
+        nodata=0,
+        tiled=True,
         compress=compress,
         BIGTIFF=bigtiff,
-        tiled=True,
         blockxsize=blocksize,
         blockysize=blocksize,
+        nbits=1,            # critical: 1-bit storage
+        sparse_ok=True      # omit all-zero tiles
     )
-    # Add codec-specific options
-    if compress in ("deflate", "zstd"):
-        out_profile["zlevel"] = zlevel
-        out_profile["predictor"] = predictor
-    elif compress in ("lzw",):
-        out_profile["predictor"] = predictor
 
-    # Remove None-valued keys to avoid GDAL warnings
+    # Codec-specific options
+    if compress in ("zstd", "deflate"):
+        out_profile["zlevel"] = zlevel
+        # predictor is not meaningful for 1-bit; leave unset
+
+    # Clean None values
     out_profile = {k: v for k, v in out_profile.items() if v is not None}
 
+    # Write dataset
     with rasterio.open(fname, "w", **out_profile) as dst:
         dst.write(arr, 1)
 
@@ -261,11 +233,10 @@ def calculate_inundation(*,
     verbose: bool = False,
     overwrite: bool = False,
     resampling=Resampling.bilinear,
-    warp_threads: int | None = 4,
-    compress: str | None = "deflate",
+    compress: str = "zstd",
+    warp_threads: int = 4,
     blocksize: int = 512,
-    zlevel: int = 1,
-    predictor: int = 2):
+    zlevel: int = 9):
 
     if verbose:
         print('calling calculate_inundation')
@@ -335,70 +306,175 @@ def calculate_inundation(*,
                 out[valid & (wtd_mean >= threshold)] = 1.0
 
                 # Write result
-                _write_geotiff(
+                write_binary_inundation_tiff(
                     fname_inund, out, base_profile,
                     compress=compress, bigtiff="IF_SAFER",
-                    blocksize=blocksize, zlevel=zlevel, predictor=predictor
+                    blocksize=blocksize, zlevel=zlevel
                 )
 
             idt += datetime.timedelta(days=1)
 
-def calculate_summary_perc_inundated(**kwargs):
-    dt_start           = kwargs.get('dt_start',               None)
-    dt_end             = kwargs.get('dt_end',                 None)
-    inundation_raw_dir = kwargs.get('inundation_raw_dir',     None)
-    inundation_sum_dir = kwargs.get('inundation_summary_dir', None)
-    fname_dem          = kwargs.get('fname_dem',              None)
-    verbose            = kwargs.get('verbose',                False)
-    overwrite          = kwargs.get('overwrite',              False)
+import os
+import datetime
+import numpy as np
+import xarray as xr
+import rioxarray
 
-    if verbose:
-        print('calling calculate_summary_perc_inundated')
-    os.makedirs(inundation_sum_dir, exist_ok=True)
+def calculate_summary_perc_inundated(
+    *,
+    dt_start,
+    dt_end,
+    inundation_raw_dir,
+    inundation_summary_dir,
+    fname_dem,
+    verbose=False,
+    overwrite=False,
+    check_georef_once=True,
+    compress="zstd",    # e.g., "LZW" for compression; None/"NONE" is fastest
+    zlevel=9,          # higher level than 1: better compression, similar read speed
+    tiled=True,
+    blocksize=512,
+):
+    """
+    Calculates percent of time inundated over the simulation period using a DEM-defined valid mask.
 
-    dt_fmt = "%Y%m%d"
-    start_s = dt_start.strftime(dt_fmt)
-    end_s   = dt_end.strftime(dt_fmt)
-    n_days = (dt_end - dt_start).days + 1
+    Rules:
+      - Valid mask: cells that are not masked (not nodata) in the DEM are valid for ALL days.
+      - For each daily grid (uint8): convert all cells within the valid mask to 1 if they equal 1; else 0.
+        (Cells outside the valid mask are ignored.)
+      - Sum these 0/1 values into a uint32 accumulator.
+      - percent = (inundated_days / total_days) * 100 for valid cells.
+      - 0% is always written as NaN; cells outside the valid mask are NaN.
+
+    Inputs:
+      - dt_start (datetime): inclusive start date
+      - dt_end   (datetime): exclusive end date
+      - inundation_raw_dir (str): directory containing inundation_{YYYYMMDD}.tiff daily rasters (uint8)
+      - inundation_summary_dir (str): output directory
+      - fname_dem (str): DEM raster used to define the valid mask and provide shape/CRS/transform
+    """
+    # Validate
+    if not (dt_start and dt_end and inundation_raw_dir and inundation_summary_dir and fname_dem):
+        raise ValueError("Missing required kwarg(s): dt_start, dt_end, inundation_raw_dir, inundation_summary_dir, fname_dem.")
+    if dt_end <= dt_start:
+        raise ValueError("dt_end must be greater than dt_start (exclusive end).")
+
+    os.makedirs(inundation_summary_dir, exist_ok=True)
     fname_output = os.path.join(
-        inundation_sum_dir,
-        f"percent_inundated_grid_{start_s}_to_{end_s}.tiff"
+        inundation_summary_dir,
+        f"percent_inundated_grid_{dt_start.strftime('%Y%m%d')}_to_{dt_end.strftime('%Y%m%d')}.tiff",
     )
     if os.path.isfile(fname_output) and not overwrite:
         if verbose:
-            print(f' found existing summary percent inundated grid {fname_output}')
+            print(f"found existing summary percent inundation grid {fname_output}")
         return fname_output
+
     if verbose:
-        print(f' writing summary percent inundation grid {fname_output}')
+        print("calling calculate_summary_perc_inundated (DEM-valid mask; 1=inundated else 0 within mask)")
+        print(f"writing summary percent inundation grid {fname_output}")
 
-    # Read base grid once
-    with rasterio.open(fname_dem) as src:
-        base_profile = src.profile.copy()
-        sumgrid_data = src.read(1, out_dtype="int32")
-        sumgrid_data[:] = 0  # Initialize to zeros
+    # Load DEM to build valid mask and obtain georeferencing
+    with rioxarray.open_rasterio(fname_dem, masked=True) as dem_da:
+        dem = dem_da.sel(band=1).load()
+    dem_mask = dem.isnull().values             # True where DEM is nodata -> invalid
+    valid_mask = ~dem_mask                     # True where DEM is valid -> valid for all days
+    height = dem.sizes["y"]
+    width = dem.sizes["x"]
+    dem_crs = dem.rio.crs
+    dem_transform = dem.rio.transform()
 
-    # Accumulate inundation counts
+    # Accumulator: uint32 count of inundated days
+    inun_count = np.zeros((height, width), dtype=np.uint32)
+
+    # Iterate dates [dt_start, dt_end)
+    did_check_georef = False
+    days_seen = 0
     idt = dt_start
-    while idt <= dt_end:
-        dt_str = idt.strftime(dt_fmt)
-        fname_inund_dti = os.path.join(inundation_raw_dir, f'inundation_{dt_str}.tiff')
-        
-        with rasterio.open(fname_inund_dti) as src:
-            inun_data = src.read(1, out_dtype="int32")
-            # Replace NaN with 0 directly in the array
-            inun_data = np.nan_to_num(inun_data, nan=0.0).astype(np.int32)
-            sumgrid_data += inun_data
-        
+
+    while idt < dt_end:
+        dt_str = idt.strftime("%Y%m%d")
+        f_in = os.path.join(inundation_raw_dir, f"inundation_{dt_str}.tiff")
+        if not os.path.exists(f_in):
+            raise FileNotFoundError(f"Missing daily inundation file: {f_in}")
+
+        # Read daily raster as uint8 without masking
+        with rioxarray.open_rasterio(f_in, masked=False) as da_in:
+            in_da = da_in.sel(band=1)
+
+            # One-time georeferencing check against DEM
+            if check_georef_once and not did_check_georef:
+                if in_da.rio.crs != dem_crs:
+                    raise ValueError(f"CRS mismatch for {f_in}: expected {dem_crs}, got {in_da.rio.crs}")
+                t_in = in_da.rio.transform()
+                if any(abs(a - b) > 1e-9 for a, b in zip(t_in, dem_transform)):
+                    raise ValueError(f"Transform mismatch for {f_in}: expected {dem_transform}, got {t_in}")
+                did_check_georef = True
+
+            arr = in_da.values  # numpy array, expected dtype uint8
+
+        # Shape/dtype checks
+        if arr.shape != (height, width):
+            raise ValueError(f"Raster shape mismatch for {f_in}: expected {(height, width)}, got {arr.shape}")
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8, copy=False)
+
+        # Build "inundated" mask: equal to 1, restricted to DEM valid mask.
+        # We reuse the eq1 array to minimize temporaries.
+        eq1 = (arr == 1)                 # bool
+        np.logical_and(eq1, valid_mask, out=eq1)  # eq1 = eq1 & valid_mask
+
+        # Increment inundation count by 1 where eq1 is True
+        np.add(inun_count, 1, out=inun_count, where=eq1)
+
+        # Cleanup per-iteration arrays
+        del eq1, arr, in_da
+
+        days_seen += 1
+        if verbose and (days_seen % 25 == 0):
+            print(f"  processed {days_seen} rasters (latest: {dt_str})")
+
         idt += datetime.timedelta(days=1)
 
-    # Convert to percentage
-    scale = 100.0 / float(n_days)
-    perc_inun = sumgrid_data.astype(np.float32) * scale
-    perc_inun[perc_inun <= 0.0] = np.nan
+    if days_seen == 0:
+        raise ValueError("Empty date range (no days between dt_start and dt_end).")
 
-    # Write output
-    _write_geotiff(fname_output, perc_inun, base_profile)
-    
+    # Compute percentage over total days for valid cells; force 0% and invalid cells to NaN
+    perc = np.empty((height, width), dtype=np.float32)
+    # Start by setting all to NaN
+    perc[:] = np.nan
+    # For valid cells, compute (count / days_seen) * 100
+    if np.any(valid_mask):
+        perc[valid_mask] = (inun_count[valid_mask].astype(np.float32) / float(days_seen)) * 100.0
+    # Force 0% to NaN as required
+    perc[perc <= 0.0] = np.nan
+
+    # Build output DataArray with georeferencing
+    perc_da = xr.DataArray(perc, dims=("y", "x"), name="percent_inundated")
+    perc_da = perc_da.rio.write_crs(dem_crs, inplace=False)
+    perc_da = perc_da.rio.write_transform(dem_transform, inplace=False)
+    perc_da.rio.write_nodata(np.nan, inplace=True)
+
+    # Clean encoding to avoid serialization conflicts
+    for key in ("_FillValue", "missing_value", "scale_factor", "add_offset"):
+        perc_da.attrs.pop(key, None)
+        perc_da.encoding.pop(key, None)
+    perc_da.encoding = {}
+
+    # Write to disk
+    write_kwargs = {}
+    if compress is not None:
+        write_kwargs["compress"] = compress
+    if zlevel is not None:
+        write_kwargs["zlevel"] = zlevel
+    if tiled:
+        write_kwargs.update(dict(tiled=True,
+                                 blockxsize=blocksize, 
+                                 blockysize=blocksize))
+    perc_da.rio.to_raster(fname_output, **write_kwargs)
+
+    if verbose:
+        print(f"wrote {fname_output} (days={days_seen}, accumulator=uint32, 0%->NaN, DEM-valid mask)")
+
     return fname_output
 
 def _zip_inundation(raw_dir, compression=zipfile.ZIP_LZMA, compresslevel=9):

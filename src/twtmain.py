@@ -139,7 +139,7 @@ async def calculate(fname_namelist):
     twttopo.calc_twi_mean(**kwargs)
     #
     #
-    if os.path.isfile(namelist.fnames.soil_texture_namelist_input):
+    if namelist.fnames.soil_texture_namelist_input is not None and os.path.isfile(namelist.fnames.soil_texture_namelist_input):
         kwargs = {'fname_texture_parent' : namelist.fnames.soil_texture_namelist_input,
                 'fname_texture_child'    : namelist.fnames.soil_texture,
                 'fname_domain'           : namelist.fnames.domain,
