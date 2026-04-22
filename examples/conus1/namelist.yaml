@@ -2,7 +2,7 @@ start_date: '2002-10-01'
 #
 end_date: '2006-09-30'
 #
-facc_strm_threshold_ncells: 100
+facc_strm_threshold_ncells: 100 # 100 x 10 m dem = 1 km2 threshold
 # 
 usedask: False
 #
@@ -10,11 +10,14 @@ overwrite: False
 #
 verbose: True
 #
-conus1_download_dir: C:\Users\GEVENSON\Data\parflow_conus1_domain\wtd\raw
+# pre-downloaded daily parflow wtd conus1 grids
+conus1_download_dir: .\input\wtd\raw 
 #
-dem: C:\Users\GEVENSON\Data\parflow_conus1_domain\dem_10m\parflow_conus1_domain_10m_dem.vrt
+# pre-downloaded 10 m dem
+dem: .\input\parflow_conus1_domain_10m_dem.vrt
 #
-soil_texture: C:\Users\GEVENSON\Data\parflow_conus1_domain\ssurgo\parflow_conus1_domain_soils.gpkg
+# pre-constructed soils gpkg
+soil_texture: .\input\parflow_conus1_domain_soils.gpkg
 #
 # hf_hydrodata credentials https://hf-hydrodata.readthedocs.io/en/latest/getting_started.html#creating-a-hydrogen-api-account
 #hf_hydrodata_un: ...
